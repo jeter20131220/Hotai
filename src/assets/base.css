@@ -1,0 +1,23 @@
+/* color palette from <https://github.com/vuejs/theme> */
+:root {
+  --main-color: #920783;
+  --sub-color: #CABCCD;
+  --bg-grey: #9a9fa3;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  font-weight: normal;
+  font-family: "Noto Sans TC", sans-serif;
+}
+
+p {
+  white-space: pre-wrap; /* CSS3 */
+  white-space: -moz-pre-wrap; /* Mozilla, since 1999 */
+  white-space: -pre-wrap; /* Opera 4-6 */
+  white-space: -o-pre-wrap; /* Opera 7 */
+  word-wrap: break-word; /* Internet Explorer 5.5+ */
+}

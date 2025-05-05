@@ -1,0 +1,11 @@
+{
+  "title": "Artificial intelligence customer service",
+  "prologue": "Hello, welcome to use the ChoozMo Intelligent Customer Service System.",
+  "type_message": "Type a message",
+  "tap_to_record": "Tap to record",
+  "wait_a_moment":"Please wait a moment...",
+  "listening": "Listening",
+  "seconds": "seconds",
+  "exceed_seconds": "(The duration should not exceed 60 seconds)",
+  "close": "Close"
+}

@@ -1,0 +1,11 @@
+{
+  "title": "AI 智能客服",
+  "prologue": "歡迎使用 AI 語音叫車，不論您在哪裡，說出目的地，車輛立即為您調度。",
+  "type_message": "請輸入訊息",
+  "tap_to_record": "請點我開始講話",
+  "wait_a_moment": "小管家思考中，請稍候...",
+  "listening": "聆聽中",
+  "seconds": "秒",
+  "exceed_seconds": "（秒數最長不超過 60 秒）",
+  "close": "關閉"
+}
