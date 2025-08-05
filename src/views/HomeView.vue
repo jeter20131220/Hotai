@@ -1,5 +1,8 @@
 <script setup>
-import { ref, reactive, onMounted, watch, nextTick } from "vue";
+import { ref, reactive, onMounted, watch, nextTick, onBeforeUnmount } from "vue";
+import L from 'leaflet'
+import 'leaflet/dist/leaflet.css'
+import { MicrophoneIcon, ArrowsPointingOutIcon, Bars3Icon } from '@heroicons/vue/24/solid'
 import { useRoute } from "vue-router";
 // i18n
 import { useI18n } from "vue-i18n";
@@ -18,17 +21,159 @@ import "animate.css";
 import Recorder from "recorder-core";
 import "recorder-core/src/engine/mp3";
 import "recorder-core/src/engine/mp3-engine";
+import "recorder-core/src/engine/wav.js"
 // QR Code
 // import { QrcodeStream, QrcodeDropZone, QrcodeCapture } from "vue-qrcode-reader";
 // Components
 import Navbar from "../components/Navbar.vue";
-import {Howl, Howler} from 'howler';
+import { Howl, Howler } from 'howler';
+import 'leaflet-routing-machine'
+import 'leaflet-routing-machine/dist/leaflet-routing-machine.css'
+
+import step0Mp3 from '../assets/img/mp3url/step0.mp3'
+
+
+import micImg from '@/assets/img/mic.png'
+
+// const audioFile = ref(null);
 
 const { t, locale } = useI18n();
 const route = useRoute();
 const routeParam = ref(null);
+// const isTyping = ref(false);
+const successBooking = ref(false)
+const currentLat = ref(25.033964)
+const currentLng = ref(121.564468)
+let map, marker
+const startLatLng = ref(null)
+const mapInstance = ref(null)
+const endLatLng = ref(null)
+const routeControl = ref(null)
+let address
+let audio;
+
+const bookingtLat = ref(null)
+const bookingLng = ref(null)
+const isListening = ref(false);
+
+const bookingAddress = ref("");
+const bookingAddressTrue = ref("");
+
+const bookingid = ref("");
+const inputMode = ref('voice') // 'voice' or 'text'
+
+const bookstate = ref('success') // 'voice' or 'text'
+
+// 所有 marker 的清單
+const markerList = []
+
+const selectedMarker = ref(null)
+
+const mapVisible = ref(false)
+
+// const currentStep = ref(0) // 控制對話進程
+
+const currentStep = ref(0) // 控制對話進程
+
+let currentLocationMarker = null
 
 
+
+
+const playAudio1 = () => {
+  audio = new Audio(step0Mp3)
+  audio.play()
+}
+
+let pickupMarker = null
+
+const highlightMarker = (lat, lng, labelText) => {
+  // 先移除原本的 marker（如果有）
+  if (pickupMarker) {
+    map.removeLayer(pickupMarker)
+  }
+
+  console.log('上車地點', lat, lng)
+
+  pickupMarker = L.marker([lat, lng], {
+    icon: L.divIcon({
+      className: 'custom-label-marker',
+      html: `
+       <div class="marker-wrapper">
+         <span class="label-text">${labelText}</span>
+             <img class="marker-icon" src="https://cmm.ai/marker/marker-red.png"/>
+      
+        </div>
+      `,
+      iconSize: [30, 35],
+      iconAnchor: [15, 23]
+    })
+  }).addTo(map)
+  map.setView([lat, lng], 18)
+}
+
+
+
+const selectPickup = (option) => {
+  console.log('地點清單', option)
+  isPickupCorrect.value = null
+  // audio = new Audio(step0Mp3step2)
+  // audio.play()
+  // messages.value.push({
+  //   label: 'text',
+  //   author: 'user',
+  //   body: `我要在「${option.name}」上車`
+  // })
+
+  // messages.value.push({
+  //   label: 'text',
+  //   author: 'ai',
+  //   body: `您選擇的是「${option.label}：${option.name}」，是否正確？`,
+  //   type: 'confirm',
+  //   selectedPickup: option.name
+  // })
+
+
+
+
+  console.log('selectPickup', option)
+
+  bookingtLat.value = option.lat;
+  bookingLng.value = option.lng;
+  bookingid.value = option.id;
+
+  bookingAddressTrue.value = option.addr;
+
+  console.log('144 bookingAddressTrue', bookingAddressTrue.value)
+
+  messageinput = option.name;
+
+  console.log("經緯度", bookingtLat.value, bookingLng.value)
+
+
+
+  highlightMarker(bookingtLat.value, bookingLng.value, bookingid.value);
+
+  // map.setView([bookingtLat.value, bookingLng.value], map.getZoom())
+
+
+  bookingAddress.value = option.name;
+
+
+
+
+  sendMessage();
+
+}
+
+
+
+// 取得地址（使用 OpenStreetMap Nominatim）
+const getAddressFromCoords = async (lat, lng) => {
+  const response = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&accept-language=zh-TW`)
+  const data = await response.json()
+  return data.display_name || '未知地點'
+}
 
 const question = reactive([
   "糖尿病初期症狀有哪些？",
@@ -36,42 +181,262 @@ const question = reactive([
   "如果我餐與餐間吃點心，這樣下一餐飯前血糖會準嗎？",
 ]);
 
-onMounted(() => {
-  getKeyFromUrl();
 
-  messages.value.push({
-    label: "prologue",
-    author: "ai",
-    body: t("prologue"),
-  });
+const greenIcon = new L.Icon({
+  iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-green.png',
+  shadowUrl: 'https://unpkg.com/leaflet@1.9.3/dist/images/marker-shadow.png',
+  iconSize: [30, 50],       // 🟢 放大圖標尺寸
+  iconAnchor: [20, 64],     // 🟢 調整 anchor 座標
+  popupAnchor: [1, -50],    // 🟢 往上移 popup，不會被圖標蓋到
+  shadowSize: [64, 64]      // 🟢 陰影也放大一點以對應圖標
+})
 
-  // question.map((item) => {
-  //   messages.value.push({
-  //     label: "question",
-  //     author: "ai",
-  //     body: item,
-  //   });
-  // });
+const redIcon = new L.Icon({
+  iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png',
+  shadowUrl: 'https://unpkg.com/leaflet@1.9.3/dist/images/marker-shadow.png',
+  iconSize: [120, 100],
+  iconAnchor: [25, 80],
+  popupAnchor: [1, -50],    // 🟢 往上移 popup，不會被圖標蓋到
+  shadowSize: [64, 64]      // 🟢 陰影也放大一點以對應圖標
+})
 
-  // updateVoiceItem();
-  window.addEventListener("resize", handleResize);
+const locationList = ref([])
 
-  // 判斷是否以 LINE 瀏覽器開啟網頁
-  document.addEventListener("DOMContentLoaded", function () {
-    const userAgent = navigator.userAgent.toLowerCase();
+const initMap = async (loactionlistmap) => {
 
-    if (userAgent.includes("line")) {
-      if (userAgent.includes("iphone") || userAgent.includes("ipad")) {
-        alert("請選擇『在 Safari 中開啟』以獲得更佳的使用體驗。");
-      } else {
-        window.open(
-          "intent://cmm.ai/nhri/#Intent;scheme=https;package=com.android.chrome;end;",
-          "_self"
-        );
+  await nextTick()
+
+  const defaultLat = 25.087860
+  const defaultLng = 121.523949
+
+  const onLocationFound = async (lat, lng) => {
+    // recOpen();
+    currentLat.value = lat
+    currentLng.value = lng
+
+    console.log('現在位置lng', lng)
+    console.log('現在位置lat', lat)
+
+    map = L.map('map').setView([currentLat.value, currentLng.value], 17)
+
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map)
+
+    markerList.push(marker)
+    currentLocationMarker = L.circleMarker([currentLat.value, currentLng.value], {
+      radius: 10,
+      fillColor: '#28a745',   // 藍色
+      color: '#ffffff',        // 邊框白色
+      weight: 2,
+      opacity: 1,
+      fillOpacity: 0.9
+    }).addTo(map);
+
+    map.setView([lat, lng], 17); // 👈 加這行
+
+
+
+    setTimeout(() => {
+      map.panBy([150, 10])
+      startLatLng.value = L.latLng(currentLat.value, currentLng.value)
+
+    }, 100) // 給一點延遲時間，確保地圖已渲染
+
+    // L.marker([], { icon: greenIcon }).addTo(map).bindPopup('龍潭大池停車場入口').openPopup()
+
+
+    // 終點（紅色）
+    // L.marker([25.047675, 121.517055], { icon: redIcon }).addTo(map).bindPopup('目的地')
+
+    // const pickupOptions = [
+    //   {
+    //     name: '台北市士林區承德路四段181號',
+    //     lat: 25.0874783,
+    //     lng: 121.5227234
+    //   },
+    //   {
+    //     name: '台北市士林區士林夜市大東路15-32號',
+    //     lat: 25.087895013899,
+    //     lng: 121.524413992429
+    //   },
+    //   {
+    //     name: '台北市士林區基河路98號',
+    //     lat: 25.088451758348,
+    //     lng: 121.523515739274
+    //   }
+    // ]
+
+    // map.on('click', function (e) {
+    //   const lat = e.latlng.lat
+    //   const lng = e.latlng.lng
+
+    //   console.log('你點的經緯度：', lat, lng)
+
+    //   // 可選：加一個臨時 marker
+    //   L.marker([lat, lng]).addTo(map).bindPopup(`你點的位置：<br>${lat}, ${lng}`).openPopup()
+    // })
+
+    console.log(loactionlistmap)
+    loactionlistmap.forEach((option, index) => {
+      const labelText = `${option.id}`
+      const marker2 = L.marker([option.lat, option.lng], {
+        icon: L.divIcon({
+          className: 'custom-label-marker',
+          html: `
+        <div class="marker-wrapper">
+         <span class="label-text">${labelText}</span>
+             <img class="marker-icon" src="https://cmm.ai/marker/marker.png"/>
+      
+        </div>
+      `,
+          iconSize: [30, 35],
+          iconAnchor: [15, 23]
+        })
+      }).addTo(map)
+      markerList.push(marker2) // ✅ 加入列表
+
+      marker2.on('click', () => {
+        marker2.openPopup()
+        bookingtLat.value = option.lat;
+        bookingLng.value = option.lng;
+        map.setView([bookingtLat.value, bookingLng.value], 18)
+
+        bookingAddress.value = option.name;
+
+        sendMessage();
+        // currentStep.value = 4
+        // messages.value.push({
+        //   label: 'text',
+        //   author: 'user',
+        //   body: `我要在「${option.name}」上車`
+        // })
+
+        // messages.value.push({
+        //   label: 'text',
+        //   author: 'ai',
+        //   body: `您選擇的是「${option.name}」，是否正確？`,
+        //   type: 'confirm',
+        //   selectedPickup: option.name
+        // })
+
+      })
+    })
+    // 導航路線（上車地 → 目的地）
+    // L.Routing.control({
+    //   show: false,           // 不顯示 routing control（包含行程說明）
+    //   waypoints: [
+    //     L.latLng(lat, lng), // 起點（當前位置）
+    //     L.latLng(25.047675, 121.517055)  // 終點（台北車站）
+    //   ],
+    //   lineOptions: {
+    //     styles: [{ color: '#d61718', weight: 6 }]
+    //   },
+    //   routeWhileDragging: false,
+    //   showAlternatives: false,
+    //   addWaypoints: false,
+    //   draggableWaypoints: false,
+    //   createMarker: function () { return null } // 不要顯示 marker
+    // }).addTo(map)
+
+    setTimeout(() => {
+      map.invalidateSize()
+    }, 300)
+    // 🌍 顯示位址訊息
+    // address = await getAddressFromCoords(lat, lng);
+    // const locationText = `📍目前位置：${address}，請問哪一個上車地點上車`
+    // messages.value.push({
+    //   label: "prologue",
+    //   author: "ai",
+    //   body: locationText,
+    //   // type: 'confirm'
+    // })
+
+  }
+
+  if (!map) {
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        onLocationFound(pos.coords.latitude, pos.coords.longitude)
+      },
+      (err) => {
+        console.warn("無法取得使用者位置，改用預設位置", err)
+        onLocationFound(defaultLat, defaultLng)
       }
+    )
+  }
+}
+
+
+
+const fetchNearbyLocations = async (lat, lng) => {
+  try {
+    const response = await axios.get('https://cmm.ai:8068/get_nearby_loc', {
+      params: {
+        lat,
+        lng,
+        radius: 50
+      },
+      headers: {
+        accept: 'application/json'
+      }
+    })
+
+    return response.data;
+  } catch (error) {
+    console.error('取得附近地點失敗:', error)
+    return []
+  }
+}
+
+// 組件掛載時自動執行
+onMounted(async () => {
+  navigator.geolocation.getCurrentPosition(
+    async (position) => {
+      const lat = position.coords.latitude
+      const lng = position.coords.longitude
+      console.log("取得當前位置：", lat, lng)
+      const nearbyLocations = await fetchNearbyLocations(lat, lng)
+      console.log('附近地點：', nearbyLocations)
+      locationList.value = nearbyLocations
+      currentLat.value = lat
+      currentLng.value = lng
+
+      mapVisible.value = true // ✅ 顯示地圖
+      await nextTick() // 等待 DOM 渲染完成
+      initMap(locationList.value, lat, lng)
+
+      messages.value.push({
+        label: "prologue",
+        author: "ai",
+        body: '以下是離您最近的上車地點',
+      })
+
+      messages.value.push({
+        label: "loction",
+        author: "ai",
+        type: "loction",
+        body: locationList.value.map((option) => ({
+          id: option.id,
+          name: option.name,
+          lat: option.lat,
+          lng: option.lng,
+          addr: option.addr
+        }))
+      })
+
+    },
+    (error) => {
+      console.error("❌ 取得定位失敗", error)
+      // 如果定位失敗，fallback 到預設位置
+      const fallbackLat = 25.087794462690706
+      const fallbackLng = 121.52379069852944
+      // 你可以複製上面流程再跑一次 fetchNearbyLocations(fallbackLat, fallbackLng)
     }
-  });
-});
+  )
+})
+
 
 const userMessage = ref("");
 // let modules = [Navigation, Autoplay]; // Swiper
@@ -100,56 +465,157 @@ const scrollToBottom = () => {
 
 let questionList = ref([]);
 
-const locations = {
-  亞東醫院: "https://maps.app.goo.gl/ktAqJbXxc16niRR8A",
-  赤豐蔬坊: "https://maps.app.goo.gl/6kiQsHMY1LndEGoY6",
-  正慧素食館: "https://maps.app.goo.gl/j8817eNQg1KHqur88",
-  雙月食品社: "https://maps.app.goo.gl/YN1NaJ5h7kCwrnVP6",
-  蔬園素食: "https://maps.app.goo.gl/A1TqKb8vPtHHSqBd6",
-  "72度C舒肥健康餐/水煮餐": "https://maps.app.goo.gl/R6jo6UQETuTEST4J6",
-  原味私廚: "https://maps.app.goo.gl/JsmnV9sCejmqv9BK6",
-};
 
-// 將符合的字串加上 a 標籤
-function addHyperlink(text, locations) {
-  let result = text;
-  for (const [name, url] of Object.entries(locations)) {
-    const regex = new RegExp(name, "g"); // 全部出現的名稱都替換
-    result = result.replace(
-      regex,
-      `<a href="${url}" target="_blank" style="color: var(--main-color);">${name}</a>`
-    );
-  }
-  return result;
-}
 
 let appoinmentInfo = reactive({}); // 掛號資料
 
+
+const isSeniorTicketValue = ref(null)
+const pickup = ref(null)
+const isPickupCorrect = ref(null);
+let messageinput
 // 傳送訊息
-async function sendMessage() {
+async function sendMessage(msg) {
   console.log("sendMessage", userMessage.value);
 
-  let message = userMessage.value;
+  pauseAudio();
+
+
+  messageinput = userMessage.value;
+
+
+  const lastMessage = messages.value[messages.value.length - 1]
+  const payload = {
+    query: messageinput,
+    lng: 0,
+    lat: 0,
+    addr: "string",
+    pickup: pickup.value,
+    chat_history: questionList.value,
+    is_senior_ticket: null,
+    location_list: locationList.value
+
+  };
+  console.log("booking", bookingtLat.value, bookingLng.value);
+
+
+  if (bookingtLat.value != null && bookingLng.value != null) {
+    console.log('userMessage.value ')
+    if (userMessage.value != "") {
+      messageinput = userMessage.value;
+    } else {
+      messageinput = bookingAddress.value;
+
+    }
+
+    console.log(bookingtLat.value, bookingLng.value, bookingAddress.value)
+
+    payload.addr = bookingAddress.value;
+
+    pickup.value = {
+      "id": bookingid.value,
+      "name": bookingAddress.value,
+      "lng": bookingLng.value,
+      "lat": bookingtLat.value,
+      "addr": bookingAddressTrue.value
+    }
+    payload.pickup = pickup.value;
+    console.log("pickup", pickup.value)
+  } else {
+    console.log("沒有帶到pickup value", locationList.value);
+    // pickup.value = locationList.value.map(item => ({
+    //   addr:item.addr,
+    //   id: item.id,
+    //   name: item.name,
+    //   lng: item.lng,
+    //   lat: item.lat
+    // }));
+    // console.log(pickup.value)
+    // pickup.value = {
+    //   "id": bookingid.value,
+    //   "name": bookingAddress.value,
+    //   "lng": bookingLng.value,
+    //   "lat": bookingtLat.value,
+    //   "addr": bookingAddressTrue.value
+    // }
+  }
   userMessage.value = ""; // 清空輸入框
 
-  if (message !== "") {
-    questionList.value.push({
-      q: !message ? "" : message,
-      a: "",
-    });
 
-    if (message && message !== "") {
+  console.log('lastMessage.body)', lastMessage.body, messages.value)
+
+  const isPickupConfirm = lastMessage.body.includes("您選擇的是") && lastMessage.body.includes("是否正確？")
+  const isSeniorTicket = lastMessage.body.includes("請問您是否需要使用敬老愛心卡？");
+  if (msg === "是") {
+    messageinput = "是"
+  } else if (msg === "否") {
+    messageinput = "否"
+  }
+  if (messageinput !== "") {
+
+    console.log('判斷式messageinput', messageinput);
+
+    console.log(questionList.value)
+    console.log("successBookingvalue", successBooking.value)
+    if (successBooking.value === false) {
+      successBooking.value = true;
+
+      const locListOriginal = JSON.stringify(locationList.value)
+      const locListsingleQuoted = locListOriginal.replace(/"/g, "'");
+      console.log(`目前位置：${bookingtLat.value},${bookingLng.value}，附近上車地點有以下${locListsingleQuoted}`)
+
+      const originalA = `目前位置：${currentLat.value},${currentLng.value}，附近上車地點有以下${locListsingleQuoted}`;
+
+      questionList.value.push({
+        q: !messageinput ? "" : messageinput,
+        a: `${originalA}`, // ← 用反引號 ``
+      });
+
+      console.log("✅ 第一次 push questionList", questionList.value, locationList.value)
+    }
+    if (isPickupConfirm) {
+      if (msg === "是") {
+        isPickupCorrect.value = true
+        console.log('isPickupConfirm,是')
+        messageinput = "是"
+        payload.is_pickup_correct = isPickupCorrect.value;
+        payload.query = "是"
+
+      } else if (msg === "否") {
+        console.log('isPickupConfirm,否')
+        isPickupCorrect.value = false;
+        messageinput = "否"
+        payload.is_pickup_correct = isPickupCorrect.value;
+        payload.query = "否"
+        map.removeLayer(pickupMarker);
+        map.setView([currentLat.value, currentLng.value], 18)
+
+      }
+    }
+
+    if (isSeniorTicket) {
+      if (msg === "是") {
+        isSeniorTicketValue.value = true
+        payload.is_senior_ticket = isSeniorTicketValue.value;
+        payload.is_pickup_correct = true;
+        payload.query = "是"
+        payload.query = messageinput
+      } else if (msg === "否") {
+        isSeniorTicketValue.value = false
+        messageinput = "否"
+        payload.is_senior_ticket = isSeniorTicketValue.value;
+        payload.is_pickup_correct = true;
+        payload.query = "否"
+
+      }
+    }
+
+    if (messageinput && messageinput !== "") {
       // 使用者訊息
       messages.value.push({
         label: "text",
         author: "user",
-        body: message,
-      });
-
-      messages.value.push({
-        label: "text",
-        author: "ai",
-        body: "回覆中…",
+        body: messageinput,
       });
     } else {
       messages.value.push({
@@ -158,309 +624,110 @@ async function sendMessage() {
         body: "抱歉，我沒有聽得很清楚，麻煩請您再說一次，謝謝。",
       });
 
-      videoLoading.value = false;
-
       return;
     }
 
     scrollToBottom();
+
   } else {
     return;
   }
 
-  let lang = getLang();
 
-  let url = `https://cmm.ai:8068/chat?message=${message}`;
-  // let url = `https://cmm.ai:9999/qa?message=${message}&language=${lang}`;
 
-  let data = {
-    chat_history: questionList.value,
-  };
+
+  let url = `https://cmm.ai:8068/ask`;
+
 
   try {
-    videoLoading.value = true;
-    const response = await axios.post(url, questionList.value);
-    console.log("response", response);
-    console.log("回覆：", response.data.message);
+    console.log("🚀 發送前", questionList.value, payload)
 
-    const hyperlinkMessage = addHyperlink(response.data.message, locations); // 加上 hyperlink
-    console.log("hyperlinkMessage", hyperlinkMessage);
+    const response = await axios.post(url, payload)
+
+    console.log("✅ 發送成功，收到 response：", response)
 
     if (response.status === 200) {
-      messages.value.splice(-1, 1); // 移除回覆中
-      videoLoading.value = false;
-      console.log("response", response);
 
-      if ("appoinment_info" in response.data) {
-        appoinmentInfo = response.data.appoinment_info;
 
-        console.log("appoinmentInfo >>", appoinmentInfo);
+      playAudio(response.data.mp3_url)
+      pickup.value = response.data.pickup;
+      // if(response.data.pickup!=null && response.data.pickup!= undefined){
 
-        setTimeout(() => {
+      // }
+      if (response.data.type === "location") {
+
+        locationList.value = response.data.location_list
+        console.log(locationList.value)
+        mapVisible.value = true // ✅ 顯示地圖
+        await nextTick() // 保證 DOM 渲染完成再呼叫 initMap
+        initMap(locationList.value)
+
+        response.data.result.forEach((msg) => {
           messages.value.push({
-            label: "btn",
+            label: "text",
             author: "ai",
-            body: "確認掛號資料 OK",
+            body: msg,
+            type: response.data.type || 'text'  // 預設為 text，避免 type 為 undefined
           });
-        }, 1000);
-      }
-
-      // 回傳影片
-      if (response.data.Answer !== "line_oa" && response.data.video_cache) {
-
-        if (response.data.video_cache !== "") {
-          const mp3Path=response.data.video_cache;
-          
-          videoLoading.value = false;
-
-          const mp3 = await import(`../../src/assets/img/mp3url/${mp3Path}.wav`);
-          playAudio(mp3.default);  // 將 mp3 路徑傳遞給 playAudio 函數
-        }
-
-        // // 暫停當前音訊
-        // if (currentAudio.value) {
-        //   currentAudio.value.pause();
-        //   currentAudio.value.currentTime = 0;
-        //   currentAudio.value = null;
-        // }
-
-        // setTimeout(() => {
-        //   isVideoPause.value = true;
-        //   videoPlay();
-        // }, 500);
-      } else if (response.data.message !== "line_oa") {
-        handleTTS(response.data.message); // 取得語音回覆
-      }
-      setTimeout(() => {
-        messages.value.push({
-          id: response.data.history_id,
-          label: "text",
-          author: "ai",
-          body: hyperlinkMessage,
         });
 
-        scrollToBottom();
-      }, 300);
+        messages.value.push({
+          label: "loction",
+          author: "ai",
+          type: "loction",
+          body: locationList.value.map((option, index) => ({
+            id: option.id,
+            name: option.name,
+            lat: option.lat,
+            lng: option.lng,
+            addr: option.addr
+          }))
+        });
+      } else {
+        setTimeout(() => {
+          response.data.result.forEach((msg) => {
+            messages.value.push({
+              label: "text",
+              author: "ai",
+              body: msg,
+              type: response.data.type || 'text'  // 預設為 text，避免 type 為 undefined
+            });
+          });
 
-      questionList.value[questionList.value.length - 1].a =
-        response.data.message;
-      console.log("questionList", questionList.value);
+          scrollToBottom();
+        }, 300);
+      }
+
+
+      // questionList.value = response.data.chat_history;
+
+      questionList.value[questionList.value.length - 1].a = response.data.result;
+      console.log("response", questionList.value);
     }
 
     console.log("messages.value", messages.value);
+
   } catch (error) {
-    console.log("error", error);
-    messages.value.splice(-1, 1); // 移除回覆中
-    messages.value.push({
-      label: "text",
-      author: "ai",
-      body: "抱歉，我沒有聽得很清楚，麻煩請您再說一次，謝謝。",
-    });
-    videoLoading.value = false;
+    console.error("❌ 發生錯誤：", error);
   }
 }
 
-let hideMenu = ref(true); // 底部選單
 let showInput = ref(true); // 輸入框
 
-function getLang() {
-  let lang = localStorage.getItem("lang");
-  let langVal = "";
 
-  switch (lang) {
-    case "zh-tw":
-      langVal = "zh";
-      break;
-    case "en-us":
-      langVal = "en";
-      break;
-    case "ja-jp":
-      langVal = "ja";
-      break;
-
-    default:
-      break;
-  }
-
-  return langVal;
-}
-
-let video = ref(null);
-
-function videoPlay() {
-  if (video.value) {
-    if (videoSrc.value !== videoMuteSources.value) {
-      video.value.loop = false;
-    } else {
-      video.value.loop = true; // 設置循環播放
-    }
-    video.value.load();
-    video.value.play();
-  }
-}
 
 // 底部選單
 const menu = ref(null);
 const menuHeight = ref(0);
 
 let isRotate = ref(false);
-let isLanguagePage = ref(true);
-let selectLang = ref("");
-let chatLoading = ref(true);
 
 const handleResize = () => {
   updateVoiceItem();
 };
 
-function chooseLang(lang) {
-  console.log("選擇語言：", lang);
-  selectLang.value = lang;
-  isLanguagePage.value = false;
-  locale.value = lang; // i18n locale
-  localStorage.setItem("lang", lang);
 
-  messages.value.push({
-    label: "text",
-    author: "ai",
-    body: t("prologue"),
-  });
 
-  // 判斷語言修改 title
-  const language = localStorage.getItem("lang") || "zh-tw";
-  console.log("language", language);
-  if (language === "zh-tw") {
-    document.title = "ChoozMo AI智能客服";
-  } else if (language === "en-us") {
-    document.title = "ChoozMo AI Intelligent Customer Service";
-  }
-
-  // 影片路徑
-  loadVideoSources();
-  if (language === "zh-tw") {
-    videoSrc.value = videoSources.value;
-    hideAnchorPrologue.value = true;
-    setTimeout(() => {
-      videoPlay();
-    }, 500);
-  } else if (language === "ja-jp") {
-    handleTTS(
-      "こんにちは、スマートカスタマーサービスをご利用いただきありがとうございます。どのようなご用件でお手伝いできますか？"
-    );
-  }
-}
-
-// 動態引入視頻文件
-const videoSources = ref(""); // 開場白影片(中)
-const videoSourcesJp = ref(""); // 開場白影片(日)
-const videoMuteSources = ref(""); // 點頭影片(靜音)
-const videoSpeakSources = ref(""); // 動嘴型影片
-
-const loadVideoSources = async () => {
-  videoSources.value = "https://cmm.ai/chatbot/video/aivoice.mp4";
-  videoSourcesJp.value = "";
-  videoMuteSources.value = "https://cmm.ai/chatbot/video/mute.mp4";
-  videoSpeakSources.value = "https://cmm.ai/chatbot/video/nhri/speaks2.mp4";
-};
-
-let videoSrc = ref("");
-let hideAnchorPrologue = ref(false); // 顯示開場白 or 點頭影片
-
-let langList = reactive([
-  {
-    lang: "中文",
-    value: "zh-tw",
-  },
-  {
-    lang: "日本語",
-    value: "ja-jp",
-  },
-  // {
-  //   lang: "English",
-  //   value: "en-us",
-  // },
-]);
-
-function getImageUrl(name) {
-  return new URL(`../assets/img/icon/${name}`, import.meta.url).href;
-}
-
-let showAnchor = ref(false); // AI 主播影片
-let currentAudio = ref(null); // 當前音訊
-
-// 文字轉語音 (TTS)
-async function handleTTS(message) {
-  console.log("handleTTS", message);
-
-  let audioLang; // 音訊語言
-  let lang = localStorage.getItem("lang");
-  console.log("lang", lang);
-
-  switch (lang) {
-    case "zh-tw":
-      audioLang = "zh-TW";
-      // audioLang = "cmn-TW";
-      break;
-    case "en-us":
-      audioLang = "en-US";
-      break;
-    case "ja-jp":
-      audioLang = "ja-JP";
-      break;
-    default:
-      break;
-  }
-  let url = `https://cmm.ai:9001/azure/text-to-speech?language_code=${audioLang}&gender=Female`;
-  // let url = `https://cmm.ai:9001/gcp/text-to-speech?language_code=${audioLang}&gender=female`;
-
-  const formData = new FormData();
-  formData.append("text", message);
-
-  try {
-    const response = await axios.post(url, formData, { responseType: "blob" });
-    console.log("TTS response", response);
-
-    const blob = new Blob([response.data], { type: "audio/mp3" });
-    const audioUrl = URL.createObjectURL(blob);
-    console.log("audioUrl", audioUrl);
-    cutVideo(audioUrl); // 剪接影片
-  } catch (error) {
-    console.log("error", error);
-  }
-}
-
-let videoLoading = ref(false);
-let isAudioPlaying = ref(false); // 音訊播放狀態
-
-// 取得語音回覆 mp4
-async function cutVideo(audioUrl) {
-  videoSrc.value = videoSpeakSources.value;
-  video.value.loop = true; // 開啟循環播放
-
-  video.value.load(); // 重新讀取影片
-  video.value.play(); // 播放影片
-
-  // 暫停當前音訊
-  if (currentAudio.value) {
-    currentAudio.value.pause();
-    currentAudio.value.currentTime = 0;
-  }
-
-  // 播放音檔
-  currentAudio.value = new Audio(audioUrl);
-  setTimeout(() => {
-    currentAudio.value.play(); // 播放音訊
-    isVideoPause.value = true;
-  }, 1000);
-  videoLoading.value = false;
-
-  console.log("isVideoPause.value", isVideoPause.value);
-
-  // 監聽音訊播放結束
-  currentAudio.value.addEventListener("ended", onAudioEnded);
-  // 監聽音訊播放狀態
-  currentAudio.value.addEventListener("play", onAudioPlay);
-  currentAudio.value.addEventListener("pause", onAudioPause);
-}
 
 // 音訊結束後暫停影片播放
 const onAudioEnded = () => {
@@ -496,6 +763,8 @@ let recordTime = ref(0); // 錄音時間
 let isRecording = ref(false); // 錄音狀態
 let timer;
 
+// let recognition = null
+
 // 語音轉文字
 async function handleAudioToText() {
   isRecording.value = false;
@@ -516,8 +785,10 @@ async function handleAudioToText() {
     default:
       break;
   }
-
-  let url = `https://cmm.ai:8068/whisper/tai_gi`;
+  // 國語
+  let url = `https://cmm.ai:9800/transcribe/?language_code=zh`;
+  // 台語
+  // let url=`https://cmm.ai:9800/transcribe/?language_code=tw&field=hotai`
 
   const formData = new FormData();
   formData.append("file", audioFile.value);
@@ -527,7 +798,7 @@ async function handleAudioToText() {
     const response = await axios.post(url, formData);
     console.log("語音轉文字 response", response);
 
-    userMessage.value = response.data.message;
+    userMessage.value = response.data.message.CorrectedTranscript;
 
     // handleTTS(userMessage.value); // 取得語音回覆
 
@@ -557,9 +828,14 @@ let rec, wave;
 // 調用 open 請求錄音權限
 let recOpen = function (success) {
   rec = Recorder({
-    type: "mp3",
-    sampleRate: 16000,
+    type: "wav",              // 你這裡用 mp3，但 Whisper 較建議 wav，見下方備註
+    sampleRate: 16000,        // ✅ Whisper 最佳建議設定
     bitRate: 16,
+    audioTrackSet: {
+      echoCancellation: true,     // ✅ 回音消除
+      noiseSuppression: true,     // ✅ 噪音抑制
+      autoGainControl: true       // ✅ 自動增益（提升語音音量）
+    },
     onProcess: function (
       buffers,
       powerLevel,
@@ -579,7 +855,6 @@ let recOpen = function (success) {
       success && success();
     },
     function (msg, isUserNotAllow) {
-      // 使用者未授權或不支援
       console.log((isUserNotAllow ? "UserNotAllow，" : "") + "無法錄音:" + msg);
     }
   );
@@ -587,10 +862,9 @@ let recOpen = function (success) {
 
 /** 開始錄音 **/
 function recStart() {
-  togglePause("pause"); // 暫停影片音訊
   // 需先呼叫 recOpen() 開啟錄音後才能調用 start、stop 方法
   console.log("開始錄音");
-
+  pauseAudio();
   recOpen(function () {
     isRecording.value = true;
 
@@ -608,275 +882,157 @@ function recStart() {
   });
 }
 
-/** 結束錄音 **/
+
 function recStop() {
-  videoLoading.value = true;
   rec.stop(
     function (blob, duration) {
-      // 利用 URL 產生本地檔案位址，不用時需要 revokeObjectURL
-      let localUrl = (window.URL || webkitURL).createObjectURL(blob); // 該 url 只能本地端使用 (例如給 audio.src 進行播放，或是給 a.href download 進行下載)
+      // 產生本地播放 URL
+      let localUrl = (window.URL || webkitURL).createObjectURL(blob);
       console.log(blob, localUrl, "時長:" + duration + "ms");
-      // rec.close(); // 釋放錄音資源 (若不釋放系統或瀏覽器將持續提示在錄音中)
-      // rec = null;
 
-      // 將 Blob 轉換為 File 對象
+      // 建立音檔 File 物件
       audioFile.value = new File([blob], "recording.mp3", {
         type: "audio/mp3",
       });
 
       console.log("audioFile", audioFile.value);
 
-      rec.close(); // 釋放錄音資源 (若不釋放系統或瀏覽器將持續提示在錄音中)
+      rec.close(); // 釋放資源
       rec = null;
 
+      // // ✅ 顯示音訊播放器與下載連結
+      // const container = document.getElementById("audioContainer");
+      // container.innerHTML = ""; // 清空之前的
+
+      // 音訊播放器
+      const audioPlayer = document.createElement("audio");
+      audioPlayer.controls = true;
+      audioPlayer.src = localUrl;
+      // container.appendChild(audioPlayer);
+
+      // 下載連結
+      const downloadLink = document.createElement("a");
+      downloadLink.href = localUrl;
+      downloadLink.download = "recording.mp3";
+      downloadLink.textContent = "⬇️ 下載錄音檔";
+      downloadLink.style.display = "inline-block";
+      downloadLink.style.marginLeft = "10px";
+      // container.appendChild(downloadLink);
+
+      // 語音辨識流程
       if (recordTime.value !== 0) {
         handleAudioToText(); // 語音轉文字
       } else {
         isRecording.value = false;
       }
 
-      clearInterval(timer); // 清空計時秒數
+      clearInterval(timer); // 清除錄音計時器
       recordTime.value = 0;
     },
     function (msg) {
       console.log("錄音失敗：" + msg);
-      rec.close(); // 可以透過 stop 方法的第 3 個參數來自動呼叫 close
+      rec.close();
       rec = null;
     }
   );
 }
 
-let videoCacheData = ref({});
+// function recStart() {
+//   if (audio) {
+//     audio.pause()
+//     audio.currentTime = 0
+//     audio = null
+//   }
+//   if (!('webkitSpeechRecognition' in window)) {
+//     alert('你的瀏覽器不支援語音辨識（建議用 Chrome）')
+//     return
+//   }
 
-async function getVideoCache(messages) {
-  // let url = `https://cmm.ai:9999/video_cache?client_message=${messages}`;
+//   recognition = new webkitSpeechRecognition()
+//   recognition.lang = 'zh-TW'
+//   recognition.interimResults = true
+//   recognition.maxAlternatives = 1
 
-  let url = `https://cmm.ai:9999/video_cache?client_message=${messages}&language=ch`;
+//   recognition.start()
+//   isRecording.value = true
 
-  try {
-    const response = await axios.post(url);
-    console.log("response_cache", response);
-    console.log("response.status", response.status);
-    if (response.data.state === 200) {
-      videoCacheData.value = response.data.message[0];
-      console.log("videoCacheData.value", videoCacheData.value);
-      return true;
-    } else {
-      return false;
-    }
-  } catch (error) {
-    console.log("error", error);
-  }
-}
+//   recognition.onresult = (event) => {
+//     let finalTranscript = ''
 
-// 播放 Video Cache
-function handleVideoCache() {
-  console.log("播放 Video Cache", videoCacheData.value);
-  // AI 客服回傳訊息
-  messages.value.push({
-    label: "text",
-    author: "ai",
-    body: videoCacheData.value.answer,
-  });
+//     for (let i = event.resultIndex; i < event.results.length; i++) {
+//       const result = event.results[i]
+//       if (result.isFinal) {
+//         finalTranscript += result[0].transcript
+//       }
+//     }
 
-  if (videoCacheData.value.video_url === null) {
-    handleTTS(videoCacheData.value.answer);
-    return;
-  }
-  // 播放 Cache 影片
-  videoSrc.value = `https://cmm.ai:9999${videoCacheData.value.video_url}`;
-  video.value.loop = false;
-  video.value.load();
+//     if (finalTranscript.trim()) {
+//       userMessage.value = finalTranscript.trim()
+//       sendMessage()
+//     }
+//   }
 
-  // 清空音訊
-  if (currentAudio.value) {
-    currentAudio.value.pause();
-    currentAudio.value.currentTime = 0;
-    currentAudio.value = null;
-  }
+//   recognition.onerror = (event) => {
+//     console.error('語音辨識錯誤:', event)
+//     isRecording.value = false
+//   }
 
-  video.value.play();
+//   recognition.onend = () => {
+//     isRecording.value = false
+//   }
+// }
 
-  isVideoPause.value = true;
+// function recStop() {
+//   if (recognition) {
+//     recognition.stop()
+//   }
+//   isRecording.value = false
+// }
 
-  setTimeout(() => {
-    videoLoading.value = false;
-  }, 1000);
-}
+
+
+
+
+/** 結束錄音 **/
+// function recStop() {
+//   rec.stop(
+//     function (blob, duration) {
+//       // 利用 URL 產生本地檔案位址，不用時需要 revokeObjectURL
+//       let localUrl = (window.URL || webkitURL).createObjectURL(blob); // 該 url 只能本地端使用 (例如給 audio.src 進行播放，或是給 a.href download 進行下載)
+//       console.log(blob, localUrl, "時長:" + duration + "ms");
+//       // rec.close(); // 釋放錄音資源 (若不釋放系統或瀏覽器將持續提示在錄音中)
+//       // rec = null;
+
+//       // 將 Blob 轉換為 File 對象
+//       audioFile.value = new File([blob], "recording.mp3", {
+//         type: "audio/mp3",
+//       });
+
+//       console.log("audioFile", audioFile.value);
+
+//       rec.close(); // 釋放錄音資源 (若不釋放系統或瀏覽器將持續提示在錄音中)
+//       rec = null;
+
+//       if (recordTime.value !== 0) {
+//         handleAudioToText(); // 語音轉文字
+//       } else {
+//         isRecording.value = false;
+//       }
+
+//       clearInterval(timer); // 清空計時秒數
+//       recordTime.value = 0;
+//     },
+//     function (msg) {
+//       console.log("錄音失敗：" + msg);
+//       rec.close(); // 可以透過 stop 方法的第 3 個參數來自動呼叫 close
+//       rec = null;
+//     }
+//   );
+// }
+
+
 
 let isVideoPause = ref(true);
-
-// AI 主播影片播放 & 暫停
-function togglePause(val) {
-  if (val === "pause") {
-    // video.value.pause();
-    isVideoPause.value = false;
-
-    if (video.value) {
-      video.value.pause();
-    }
-    if (currentAudio.value) {
-      currentAudio.value.pause(); // 暫停音訊
-    }
-  } else {
-    isVideoPause.value = true;
-
-    if (video.value) {
-      video.value.play();
-    }
-    if (currentAudio.value) {
-      currentAudio.value.play(); // 播放音訊
-      currentAudio.value.addEventListener("ended", onAudioEnded);
-    }
-  }
-}
-
-// 掛號
-async function startAppoint() {
-  let url = "https://cmm.ai:9999/start_appoint";
-
-  try {
-    const response = await axios.post(url, appoinmentInfo);
-    console.log("掛號 response", response);
-
-    if (response.status === 200) {
-      handleTTS(response.data.message);
-      messages.value.push({
-        label: "text",
-        author: "ai",
-        body: response.data.message,
-      });
-    }
-  } catch (error) {
-    console.log("error", error);
-  }
-}
-
-const isLiked = ref(false);
-const isDisliked = ref(false);
-// 使用物件管理每個 message 的喜好狀態
-const likeStatus = reactive({});
-
-// 切換喜歡狀態
-const toggleLike = (id) => {
-  if (!likeStatus[id]) {
-    likeStatus[id] = { isLiked: false, isDisliked: false };
-  }
-
-  likeStatus[id].isLiked = !likeStatus[id].isLiked;
-  if (likeStatus[id].isLiked) {
-    likeStatus[id].isDisliked = false;
-  }
-
-  setQuality(id);
-};
-
-// 切換不喜歡狀態
-const toggleDislike = (id) => {
-  if (!likeStatus[id]) {
-    likeStatus[id] = { isLiked: false, isDisliked: false };
-  }
-
-  likeStatus[id].isDisliked = !likeStatus[id].isDisliked;
-  if (likeStatus[id].isDisliked) {
-    likeStatus[id].isLiked = false;
-  }
-
-  setQuality(id);
-};
-
-// 回覆品質
-async function setQuality(id) {
-  console.log("likeStatus", likeStatus);
-
-  let quality;
-
-  if (likeStatus[id].isLiked) {
-    quality = true;
-  } else {
-    quality = false;
-  }
-
-  let url = `https://cmm.ai:9999/response_quality?history_id=${id}&is_response_good=${quality}`;
-
-  try {
-    const response = await axios.post(url);
-    console.log("回覆品質", response);
-  } catch (error) {
-    console.log("error", error);
-  }
-}
-
-// Line OA 解密
-const base64Ciphertext = ref(null);
-const aesKey = "03e1390daed34fcb8dad00a74761ec1f"; // AES-256 需要 32 字元長的密鑰
-const aesIv = "2f497cc4c692bc97"; // CBC 模式需要 16 字元的 IV
-
-// AES 解密
-async function decryptAES256CBCBase64(ciphertext, key, iv) {
-  try {
-    // Base64 解碼
-    const encryptedBytes = Uint8Array.from(atob(ciphertext), (c) =>
-      c.charCodeAt(0)
-    );
-
-    // 將密鑰和 IV 轉換為 CryptoKey 和 ArrayBuffer
-    const aesKey = await crypto.subtle.importKey(
-      "raw",
-      new TextEncoder().encode(key),
-      { name: "AES-CBC" },
-      false,
-      ["decrypt"]
-    );
-
-    const ivBuffer = new TextEncoder().encode(iv);
-
-    // 解密
-    const decryptedBuffer = await crypto.subtle.decrypt(
-      { name: "AES-CBC", iv: ivBuffer },
-      aesKey,
-      encryptedBytes
-    );
-
-    // 解密完成，轉回字串
-    const decoder = new TextDecoder();
-    return decoder.decode(decryptedBuffer);
-  } catch (err) {
-    console.error("解密失敗：", err.message);
-    return `解密失敗：${err.message}`;
-  }
-}
-
-// 從 URL 取得 key 並解密
-function getKeyFromUrl() {
-  let key = route.query.key; // 直接從路由取值
-  if (key) {
-    key = decodeURIComponent(key).replace(/ /g, "+"); // 將空格替換回 +
-    base64Ciphertext.value = key;
-    handleDecryption();
-  } else {
-    console.log("URL 中未找到 key 參數");
-  }
-}
-
-let plaintext = ref(null);
-
-// 解密處理
-async function handleDecryption() {
-  if (base64Ciphertext.value) {
-    plaintext.value = await decryptAES256CBCBase64(
-      base64Ciphertext.value,
-      aesKey,
-      aesIv
-    );
-
-    plaintext.value = JSON.parse(plaintext.value);
-
-    console.log("解密：", plaintext.value);
-  } else {
-    console.log("Base64 密文為空");
-  }
-}
 
 let showVoiceItem = ref(true);
 const prologue = ref(null);
@@ -906,28 +1062,7 @@ const changeFontSize = (size) => {
 
 
 // 設定開場白語言
-function setVoice(item) {
-  console.log("設定開場白語言", item);
-  let mp3Url;
-  if (item === "國語") {
-    mp3Url = "https://cmm.ai:9999/static/introduction.mp3";
-  } else {
-    mp3Url = "https://cmm.ai:8111/tts_folder/20241226135909_nuskd.mp3";
-  }
 
-  // 暫停當前音訊
-  if (currentAudio.value) {
-    currentAudio.value.pause();
-    currentAudio.value.currentTime = 0;
-  }
-
-  // 播放音檔
-  currentAudio.value = new Audio(mp3Url);
-  setTimeout(() => {
-    currentAudio.value.play(); // 播放音訊
-    isVideoPause.value = true;
-  }, 100);
-}
 
 // function playAudio(mp3){
 //   let mp3Url = `../..`+mp3;  // 將 mp3 路徑賦值給 mp3Url
@@ -946,218 +1081,252 @@ function setVoice(item) {
 //   }, 1000);
 // }
 let sound = ref(null); // 當前音訊
-function playAudio(mp3Url) {
+function playAudio(mp3Url, volume = 1.0) {
+  if (sound.value) {
+    sound.value.stop(); // 停掉上一段，避免重疊
+  }
+
   sound.value = new Howl({
-      src: [mp3Url],
-      format: ["wav"], 
-      autoplay: true, 
-    });
+    src: [mp3Url],
+    autoplay: true,
+    volume, // 設定音量，預設是 1.0
+  });
 
-    sound.value.play();
-  // // 檢查 currentAudio 是否已經被初始化
-  // if (!currentAudio.value) {
-  //   // 如果還沒有，則初始化並設置音頻來源
-  //   currentAudio.value = new Audio(mp3Url);
-  // } else {
-  //   // 如果已經存在，就更新音源並重置時間
-  //   currentAudio.value.src = mp3Url;
-  //   currentAudio.value.currentTime = 0;  // 重置播放時間
-  // }
-
-  // // 播放音頻
-  // currentAudio.value.play().catch((err) => {
-  //   console.error('播放音頻時發生錯誤：', err);
-  // });
+  sound.value.play();
 }
 
+function pauseAudio() {
+  if (sound.value && sound.value.playing()) {
+    sound.value.pause();
+  }
+}
+let isDragging = false
+let dragOffset = { x: 0, y: 0 }
+const buttonWidth = 60 // 按鈕寬度
+const buttonHeight = 60 // 按鈕高度
+const marginRight = 205  // 距離右邊距
+const marginBottom = 130 // 距離底部（避免被手機底部UI擋住）
+
+const position = ref({
+  x: window.innerWidth - buttonWidth - marginRight,
+  y: window.innerHeight - buttonHeight - marginBottom
+})
+
+const startDrag = (e) => {
+  isDragging = true
+  const clientX = e.type === 'touchstart' ? e.touches[0].clientX : e.clientX
+  const clientY = e.type === 'touchstart' ? e.touches[0].clientY : e.clientY
+  dragOffset = {
+    x: clientX - position.value.x,
+    y: clientY - position.value.y,
+  }
+
+  window.addEventListener('mousemove', onDrag)
+  window.addEventListener('mouseup', stopDrag)
+  window.addEventListener('touchmove', onDrag)
+  window.addEventListener('touchend', stopDrag)
+}
+
+const onDrag = (e) => {
+  if (!isDragging) return
+  const clientX = e.type === 'touchmove' ? e.touches[0].clientX : e.clientX
+  const clientY = e.type === 'touchmove' ? e.touches[0].clientY : e.clientY
+
+  position.value = {
+    x: clientX - dragOffset.x,
+    y: clientY - dragOffset.y,
+  }
+}
+
+const stopDrag = () => {
+  isDragging = false
+  window.removeEventListener('mousemove', onDrag)
+  window.removeEventListener('mouseup', stopDrag)
+  window.removeEventListener('touchmove', onDrag)
+  window.removeEventListener('touchend', stopDrag)
+}
+
+let recognition
 
 
+if ('webkitSpeechRecognition' in window) {
+  const SpeechRecognition = window.webkitSpeechRecognition
+  recognition = new SpeechRecognition()
+  recognition.continuous = false
+  recognition.lang = 'zh-TW' // 或 en-US
+  recognition.interimResults = false
 
+  recognition.onstart = () => {
+    isListening.value = true
+  }
+
+  recognition.onend = () => {
+    isListening.value = false
+  }
+
+  recognition.onresult = (event) => {
+    const transcript = event.results[0][0].transcript
+    userMessage.value += transcript
+    recognition.stop();
+    sendMessage();
+  }
+} else {
+  console.warn('這個瀏覽器不支援語音辨識')
+}
+
+function startListening() {
+  if (!recognition) return
+  recognition.start()
+}
 </script>
 
 <template>
   <Navbar />
   <main>
-    <div class="main-containar"   >
+    <div class="main-containar">
+
       <div class="chat-content">
-        <section
-          ref="chatArea"
-          class="chat-area"
-          :class="{ 'area-open': isRotate, 'hide-menu': hideMenu }"
-        >
-          <h1>AI語音叫車服務</h1>
-          <p class="text-center mb-5">智慧出行，隨叫隨到——您的貼心AI叫車助手</p>
-          <div v-for="message in messages" class="message-content">
-            <!-- 歡迎詞 -->
-            <div
-              v-if="message.label === 'prologue'"
-              ref="prologue"
-              class="message d-flex"
-              :class="{
+        <div v-if="mapVisible" id="map" class="w-full" style="height: 200px;"></div>
+        <section class="sec-chat-area">
+          <div ref="chatArea" :style="{ height: mapVisible ? '65vh' : '90vh' }" class="chat-area"
+            :class="{ 'area-open': isRotate }">
+
+            <div v-for="message in messages" class="message-content" :key="index"
+              :class="{ 'last-message': index === messages.length - 1 }">
+              <div v-if="message.label === 'prologue'" ref="prologue">
+                <!-- 歡迎詞 -->
+                <div class="message d-flex" :class="{
+                  'message-out': message.author === 'user',
+                  'message-in': message.author !== 'user',
+                  animate__fadeInRight: message.author === 'user',
+                  animate__fadeInLeft: message.author !== 'user',
+                }">
+                  <p v-html="message.body"></p>
+                </div>
+                <!-- <div v-if="message.type === 'confirm'" class="flex gap-4 mt-3 ml-4 justify-start">
+                  <button @click="sendMessage('是')" class="bg-green-500 text-white px-3 py-1 rounded">是</button>
+                  <button @click="handleConfirm('否')" class="bg-gray-400 text-white px-3 py-1 rounded">否</button>
+                </div> -->
+              </div>
+
+              <!-- <div > -->
+              <div v-if="message.label === 'text'" class="message animate__animated" :class="{
                 'message-out': message.author === 'user',
                 'message-in': message.author !== 'user',
                 animate__fadeInRight: message.author === 'user',
                 animate__fadeInLeft: message.author !== 'user',
-              }"
-            >
-              <p v-html="message.body"></p>
+              }">
+                <p v-html="message.body"></p>
+              </div>
+              <div v-if="message.type === 'loction'" class="flex flex-col gap-4 mt-3">
+                <div v-for="(item, index) in message.body" :key="item.name" @click="selectPickup(item)"
+                  class="pickup-box rounded-lg px-4 py-3 cursor-pointer hover:opacity-90 transition">
+                  <div class="font-semibold text-xl text-[#D61718]">上車地點{{ item.id }}</div>
+                  <div class="text-[#D61718] text-xl">{{ item.name }}</div>
+                </div>
+              </div>
 
-              <!-- <span v-show="showVoiceItem" class="voice-item">
-                <button @click="setVoice('國語')" class="me-3">
-                  <p>國語</p>
-                  <img src="../assets/img/wireless.png" alt="" width="20" />
+              <div v-if="message.type === 'confirm'" class="flex gap-4 mt-3 ml-4 justify-start">
+                <button @click="sendMessage('是')" class="bg-green-500 text-white px-8 py-3 text-xl rounded">
+                  是
                 </button>
-                <button @click="setVoice('台語')">
-                  <p>台語</p>
-                  <img src="../assets/img/wireless.png" alt="" width="20" />
-                </button>
-              </span> -->
-            </div>
-
-            <div
-              v-if="message.label === 'text'"
-              class="message animate__animated"
-              :class="{
-                'message-out': message.author === 'user',
-                'message-in': message.author !== 'user',
-                animate__fadeInRight: message.author === 'user',
-                animate__fadeInLeft: message.author !== 'user',
-              }"
-            >
-              <p v-html="message.body"></p>
-
-              <div
-                v-if="message.author === 'ai' && message.id"
-                class="d-flex justify-end like-btn"
-              >
-                <button @click="toggleLike(message.id)">
-                  <img
-                    v-if="!likeStatus[message.id]?.isLiked"
-                    src="../assets/img/like.png"
-                    alt="Like"
-                  />
-                  <img v-else src="../assets/img/like-solid.png" alt="Liked" />
-                </button>
-                <button @click="toggleDislike(message.id)" class="mx-2">
-                  <img
-                    v-if="!likeStatus[message.id]?.isDisliked"
-                    src="../assets/img/dislike.png"
-                    alt="Dislike"
-                  />
-                  <img
-                    v-else
-                    src="../assets/img/dislike-solid.png"
-                    alt="Disliked"
-                  />
+                <button @click="sendMessage('否')" class="bg-gray-400 text-white px-8 py-3 text-xl rounded">
+                  否
                 </button>
               </div>
-            </div>
 
-            <div v-if="message.label === 'line'" class="line-item">
-              <img
-                src="../assets/img/line_oa_qrcode.png"
-                alt="Line OA Qrcode"
-              />
-            </div>
+              <!-- </div> -->
 
-            <!-- 確認掛號按鈕 -->
-            <div v-if="message.label === 'btn'" class="confirm-item">
-              <button @click="startAppoint()">
-                {{ message.body }}
-              </button>
-            </div>
+              <div v-if="message.label === 'line'" class="line-item">
+                <img src="../assets/img/line_oa_qrcode.png" alt="Line OA Qrcode" />
+              </div>
 
-            <!-- 問題按鈕 -->
-            <div v-if="message.label === 'question'" class="confirm-item">
-              <button
-                @click="
-                  userMessage = message.body;
-                  sendMessage();
-                "
-              >
-                {{ message.body }}
-              </button>
-            </div>
 
-            <p
-              class="my-5 text-center font-weight-medium"
-              v-if="message.label === 'text2'"
-              v-html="message.text2"
-            ></p>
+
+              <p class="my-5 text-center font-weight-medium" v-if="message.label === 'text2'" v-html="message.text2">
+              </p>
+            </div>
+            <div class="h-[50px]" style="padding: 50px; "></div>
+            <!-- <p class="my-5 text-center font-weight-medium"> 請點擊上方錄音按鈕，開始聊天！ </p> -->
           </div>
-          <!-- <p class="my-5 text-center font-weight-medium"> 請點擊上方錄音按鈕，開始聊天！ </p> -->
         </section>
 
+
         <!-- 底部選單 -->
-        <div ref="menu" class="menu">
-          <div class="d-flex align-center position-relative">
-            <div class="w-100 d-flex align-center justify-center">
-              <!-- 對話輸入框 -->
-              <form
-                @submit.prevent="sendMessage()"
-                class="chat-inputs"
-                :class="{ 'd-none': !showInput }"
-              >
-                <!-- 文字尺寸按鈕 -->
-                <button type="button" @click="toggleFontSizeMenu">
-                  <img
-                    width="25"
-                    src="../assets/img/font-size.png"
-                    alt=""
-                    class="me-5 pt-1"
-                  />
-                </button>
+        <div class="menubox">
+          <div ref="menu" class="menu">
+            <div class="align-center position-relative">
+              <div class="w-100 d-flex align-center justify-center">
+                <!-- 對話輸入框 -->
+                <form class="chat-inputs" :class="{ 'd-none': !showInput }">
+                  <!-- 文字尺寸選單 -->
 
-                <!-- 文字尺寸選單 -->
-                <div v-if="showFontSizeMenu" class="font-size-menu">
-                  <ul>
-                    <li
-                      v-for="size in fontSizes"
-                      :key="size"
-                      @click="changeFontSize(size)"
-                    >
-                      {{ size }}
-                    </li>
-                  </ul>
-                </div>
+                  <!-- <div v-if="inputMode === 'text'" cclass="relative w-full keyboard">
+                    <textarea v-model="userMessage" :placeholder="t('type_message')" rows="2"
+                      class="w-full border border-gray-300 rounded-bl-xl rounded-br-xl p-3 pr-12"></textarea>
 
-                <input
-                  v-model="userMessage"
-                  type="text"
-                  :placeholder="t('type_message')"
-                />
+         
+                    <button type="submit" @click="sendMessage()"
+                      class="absolute bottom-16 right-5   p-2 rounded-full  transition paperplan">
+                      <img width="30" src="../assets/img/paper-plane-solid.svg" alt="送出" />
+                    </button>
+                    <div class="text-end">
+                      <button @click="inputMode = 'voice'"
+                        class=" bottom-1 right-1 p-2 shadow rounded-full hover:bg-gray-100 transition">
+                        <img width="30" src="../assets/img/mic.png" alt="語音輸入" />
+                      </button>
+                    </div>
+                  </div> -->
 
-                <!-- 錄音按鈕 -->
-                <div v-if="!isRecording" @click="recStart" class="btn-item">
-                  <button type="submit" class="submit" :disabled="videoLoading">
-                    <img
-                      width="25"
-                      src="../assets/img/mic.png"
-                      alt=""
-                      class="me-5 pt-1"
-                    />
-                  </button>
-                </div>
-                <div v-else @click="recStop" class="btn-item">
-                  <button type="submit" class="submit" :disabled="videoLoading">
-                    <img
-                      width="25"
-                      src="../assets/img/audio.png"
-                      alt=""
-                      class="me-5 pt-1"
-                    />
-                  </button>
-                </div>
+                  <div v-if="inputMode === 'voice'" class="relative">
+                    <div ref="micButton" class="fixed z-50"
+                      :style="{ top: `${position.y - 30}px`, left: `${position.x}px` }">
+                      <div class="mic-drag-wrapper floating draggable-button">
+                        <!-- 拖拉區（不含按鈕） -->
+                        <div class="drag-handle-area text-center" @mousedown.stop="startDrag"
+                          @touchstart.stop.prevent="startDrag">
+                          <Bars3Icon class="absolute top-0 left-1/2 w-6 h-6 text-gray-900" />
+                        </div>
 
-                <button type="submit" class="submit">
-                  <img
-                    width="20"
-                    src="../assets/img/paper-plane-solid.svg"
-                    alt=""
-                    class="pt-1"
-                  />
-                </button>
-              </form>
+
+
+                        <div @click="startListening" class="btn-item">
+                          <button type="button" class="submit mic select-none"
+                            style="pointer-events: auto; -webkit-user-select: none; -webkit-touch-callout: none; "
+                            :class="isListening ? 'text-green animate-pulse border-green' : 'text-gray-600  text-red border-red'">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
+                              stroke="currentColor" class="size-10">
+                              <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3Z" />
+                            </svg>
+                          </button>
+                        </div>
+
+                        <!-- 錄音按鈕 -->
+                        <!-- <div v-if="!isRecording" @click="recStart" class="btn-item">
+                            <button type="button" class="submit mic select-none"
+                              style="pointer-events: auto; -webkit-user-select: none; -webkit-touch-callout: none;">
+                              <img width="40" :src="micImg" alt="語音輸入" class="pt-1 pointer-events-none select-none" />
+                            </button>
+                          </div>
+
+                          
+
+                          <div v-else @click="recStop" class="btn-item">
+                            <button type="submit" class="submit voice" :disabled="videoLoading">
+                              <img width="40" :src="micImg" alt="語音輸入中" class="pt-1 pointer-events-none select-none" />
+                              <v-icon icon="mdi-square" size="large" color="#34A853"></v-icon>
+                            </button>
+                          </div> -->
+
+                      </div>
+                      <p class="text-center mt-3" :style="{ color: '#6B7280' }">
+                        {{ isRecording ? '輕觸可停止語音辨識' : '輕觸開始語音辨識' }}
+                      </p>
+                    </div>
+                  </div>
+                </form>
+              </div>
             </div>
           </div>
         </div>
@@ -1166,17 +1335,122 @@ function playAudio(mp3Url) {
   </main>
 </template>
 
-<style scoped lang="scss">
+<style lang="scss">
+.leaflet-popup-content {
+  font-size: 18px;
+  width: 80px;
+}
+
+// .label-text {
+//   width: 30px;
+//   margin-top: 4px;
+//   background-color: #fff;
+//   color: #D61718;
+//   font-size: 20px;
+//   padding: 10px;
+//   border-radius: 6px;
+//   box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+//   font-weight: 600;
+//   // white-space: nowrap;
+// }
+
+.marker-icon {
+  width: 35px !important;
+}
+
+
+.keyboard {
+  img {
+    filter: invert(14%) sepia(77%) saturate(4533%) hue-rotate(346deg) brightness(104%) contrast(94%);
+  }
+}
+
+.paperplan {
+  img {
+    filter: invert(14%) sepia(77%) saturate(4533%) hue-rotate(346deg) brightness(104%) contrast(94%);
+  }
+}
+
+.mic {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  // border: 3px solid #D61718;
+  margin: 10px auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: white;
+
+
+  img {
+    filter: invert(14%) sepia(77%) saturate(4533%) hue-rotate(346deg) brightness(104%) contrast(94%);
+
+  }
+}
+
+.airplane {
+  img {
+    filter: invert(77%) sepia(26%) saturate(1%) hue-rotate(343deg) brightness(100%) contrast(110%);
+
+  }
+}
+
+.voice {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  border: 3px solid #34A853;
+  background-color: white;
+  margin: 10px auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: white;
+
+  img {
+    filter: invert(58%) sepia(15%) saturate(1932%) hue-rotate(83deg) brightness(91%) contrast(83%);
+  }
+}
+
+.custom-border-t {
+  border-top: 1px solid #D61718 !important;
+}
+
+.text-red{
+color:#D61718;
+}
+
+.text-green{
+  color:#34A853;
+}
+
+.border-green{
+  border: 3px solid #34A853;
+}
+
+.border-red{
+      border: 3px solid #D61718;
+}
+
+.footer {
+  width: 50%;
+  margin: 0 auto;
+
+  span {
+    color: #7F7F7F;
+  }
+}
+
 main {
   height: 100vh;
   display: flex;
   flex-direction: column;
   justify-content: center;
   align-items: center;
-  /* background-color: var(--sub-color); */
-  background-color: rgba(0, 0, 0, 0.6);
+  background: #D8D8D8;
+  // background-color: rgba(0, 0, 0, 0.6);
   background-blend-mode: multiply;
-  background-image: url("@/assets/img/banner.jpg");
   background-size: cover;
   background-position: center center;
 }
@@ -1192,6 +1466,7 @@ main {
   background-color: var(--main-color);
   cursor: pointer;
   transition: all 0.3s;
+
   &:hover {
     opacity: 0.7;
   }
@@ -1200,8 +1475,10 @@ main {
 .lang-content {
   display: flex;
   flex-direction: column;
+
   .main-btn {
     margin-bottom: 40px;
+
     &:last-child {
       margin-bottom: 0;
     }
@@ -1233,12 +1510,15 @@ main {
       @media (min-width: 1441px) {
         width: 54%;
       }
+
       @media (min-width: 1281px) and (max-width: 1440px) {
         width: 54%;
       }
+
       @media (min-width: 1025px) and (max-width: 1280px) {
         width: 50%;
       }
+
       @media (max-width: 575px) {
         top: 15px;
       }
@@ -1261,14 +1541,16 @@ main {
       background: var(--main-color);
       border: none;
       border-radius: 100px;
+
       @media (min-width: 1440px) {
         width: 50px;
         height: 50px;
       }
+
       img {
         width: 25px;
-        filter: invert(100%) sepia(0%) saturate(0%) hue-rotate(93deg)
-          brightness(103%) contrast(103%);
+        filter: invert(100%) sepia(0%) saturate(0%) hue-rotate(93deg) brightness(103%) contrast(103%);
+
         @media (min-width: 1440px) {
           width: 40px;
         }
@@ -1304,12 +1586,23 @@ main {
         }
       }
 
+      .fixed-mic-btn {
+        position: fixed;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: transparent;
+        z-index: 1000;
+      }
+
       .btn-item {
         width: 100%;
         height: 100px;
+        padding: 30px;
         display: flex;
         align-items: center;
         justify-content: center;
+
         cursor: pointer;
 
         @media (max-width: 1440px) {
@@ -1329,6 +1622,7 @@ main {
     margin-top: 7vh;
     letter-spacing: 1px;
     border-radius: 10px 10px 0 0;
+
 
     // @media (max-width: 1920px) {
     //   height: 75vh;
@@ -1359,12 +1653,15 @@ main {
         font-size: 1.125rem;
         font-weight: 500;
         color: white;
+
         @media (min-width: 1440px) {
           font-size: 1.6rem;
         }
+
         @media (min-width: 1080px) {
           font-size: 1.3rem;
         }
+
         @media (max-width: 375px) {
           font-size: 0.875rem;
         }
@@ -1394,20 +1691,22 @@ main {
     .chat-area {
       display: flex;
       flex-direction: column;
-      background: var(--sub-color);
-      height: 86vh;
+      background: #fff;
+      // height: 70vh;
       padding: 0 1em 1em;
       overflow-x: hidden;
       overflow-y: auto;
       transition: all 0.3s;
+      // border-bottom-left-radius: 16px;
+      // border-bottom-right-radius: 16px;
 
       h1 {
-        margin-top: 1rem;
-        text-align: center;
-        font-size: 2rem;
-        font-weight: 600;
-        color: var(--main-color);
-        letter-spacing: 2px;
+        // margin-top: 1rem;
+        // text-align: center;
+        // font-size: 2rem;
+        // font-weight: 600;
+        // color: var(--main-color);
+        // letter-spacing: 2px;
       }
     }
 
@@ -1416,29 +1715,31 @@ main {
       flex-direction: column;
 
       .message {
-        max-width: 80%;
-        font-size: 1rem;
+        max-width: 90%;
+        font-size: 1.6rem;
         border-radius: 20px;
         padding: 0.5em 1.2em;
         position: relative;
         white-space: pre-line;
+        box-shadow: 2px 4px 5px rgba(0, 0, 0, 0.5);
 
         &:first-child {
           margin-top: 0;
         }
 
         @media (max-width: 1280px) {
-          max-width: 75%;
+          max-width: 90%;
           font-size: 1.3rem;
         }
 
         @media (max-width: 600px) {
-          font-size: 0.875rem;
+          font-size: 1.4rem;
+
         }
 
         &.message-out {
           margin-left: auto;
-          background: var(--bg-grey);
+          background: #D61718;
           color: white;
         }
 
@@ -1479,14 +1780,12 @@ main {
             background-color: var(--main-color);
 
             img {
-              filter: invert(100%) sepia(84%) saturate(2%) hue-rotate(350deg)
-                brightness(110%) contrast(101%);
+              filter: invert(100%) sepia(84%) saturate(2%) hue-rotate(350deg) brightness(110%) contrast(101%);
             }
           }
 
           img {
-            filter: invert(15%) sepia(57%) saturate(4442%) hue-rotate(293deg)
-              brightness(88%) contrast(111%);
+            filter: invert(15%) sepia(57%) saturate(4442%) hue-rotate(293deg) brightness(88%) contrast(111%);
           }
         }
       }
@@ -1517,8 +1816,7 @@ main {
 
           img {
             width: 16px;
-            filter: invert(100%) sepia(32%) saturate(1978%) hue-rotate(187deg)
-              brightness(78%) contrast(108%);
+            filter: invert(100%) sepia(32%) saturate(1978%) hue-rotate(187deg) brightness(78%) contrast(108%);
           }
         }
       }
@@ -1526,15 +1824,21 @@ main {
 
     .chat-inputs {
       width: 100%;
-      height: 7vh;
-      display: flex;
-      align-items: center;
-      padding: 13px 20px;
-      background-color: white;
+      // height: 11vh;
+      // display: flex;
+      // align-items: center;
+      padding: 10px 10px 0px 10px;
 
-      input {
+      // background-color: #fff;
+
+
+      textarea {
         width: 100%;
+        font-size: 24px;
         border: none;
+        // background: #fff;
+        border-radius: 25px;
+        padding: 0.5rem 1rem; // ← ⭐ 關鍵：內距讓文字不會貼邊
 
         &:focus-visible {
           outline: none;
@@ -1542,10 +1846,11 @@ main {
       }
 
       button {
-        border: none;
-        background: white;
+        // border: none;
+        // background: white;
         cursor: pointer;
-        font-size: 16px !important;
+        // font-size: 16px !important;
+
 
         &:hover {
           img {
@@ -1553,21 +1858,18 @@ main {
           }
         }
 
-        img {
-          // padding-top: 5px;
-          object-fit: contain;
-          transition: all 0.3s;
-          filter: invert(15%) sepia(57%) saturate(4442%) hue-rotate(293deg)
-            brightness(88%) contrast(111%);
-        }
+
       }
 
       ::placeholder {
-        font-size: 1.25rem !important;
+        font-size: 24px;
         font-weight: 500;
-        color: var(--sub-color);
-        opacity: 1; /* Firefox */
+        color: #7F7F7F;
+        opacity: 1;
+        // text-align: center;
+        /* Firefox */
         letter-spacing: 1px;
+
       }
 
       ::-ms-input-placeholder {
@@ -1575,31 +1877,7 @@ main {
         color: var(--sub-color);
       }
 
-      .font-size-menu {
-        position: relative;
 
-        ul {
-          position: absolute;
-          width: 70px;
-          position: absolute;
-          top: -310px;
-          left: -53px;
-          list-style: none;
-          background-color: #fff;
-          border: 1px solid #ccc;
-          border-radius: 5px;
-          li {
-            padding: 5px;
-            cursor: pointer;
-            text-align: center;
-            border-bottom: 1px solid #ccc;
-
-            &:hover {
-              background-color: #f0f0f0;
-            }
-          }
-        }
-      }
     }
   }
 }
@@ -1617,23 +1895,47 @@ main {
   line-height: 1.7;
 }
 
+.sec-chat-area {
+  padding: 10px 10px 0px 10px;
+}
+
+.menubox {
+  padding: 0px 10px 10px 10px;
+}
+
+
+
 /* 底部選單 */
 .menu {
+  // border-top: 1px solid #e5e5e5;
+  // background: #fff;
   position: fixed;
   z-index: 300;
-  left: 0;
-  bottom: 0px;
+  left: 0%;
+  bottom: 20px;
+  padding: 15px 15px 15px 15px;
   right: 0;
   color: var(--text-color);
-  background-color: white;
+  width: 100%;
+  // border-radius: 30%;
+
   @media (min-width: 1440px) {
     position: static;
   }
+
   @media (min-width: 1281px) and (max-width: 1440px) {
     position: static;
   }
+
   @media (min-width: 1025px) and (max-width: 1280px) {
     position: static;
+  }
+
+  img {
+    // padding-top: 5px;
+    object-fit: contain;
+    transition: all 0.3s;
+    // filter: invert(15%) sepia(57%) saturate(4442%) hue-rotate(293deg) brightness(88%) contrast(111%);
   }
 
   &.hide-menu table {
@@ -1698,6 +2000,7 @@ main {
     width: 4vw !important;
     height: 4vw !important;
   }
+
   .v-icon--size-large {
     @media (min-width: 1440px) {
       font-size: 2.5vw;
@@ -1746,5 +2049,165 @@ main {
       letter-spacing: 1px;
     }
   }
+}
+
+#map {
+
+  flex: 1;
+  width: 100%;
+  z-index: 0;
+  min-height: 200px;
+
+}
+
+.mark {
+  width: 16px;
+  height: 16px;
+  background-color: #2563eb;
+  /* Tailwind 的 bg-blue-600 對應色碼 */
+  border-radius: 9999px;
+  box-shadow: 0 0 6px rgba(0, 0, 0, 0.3);
+}
+
+.custom-center-marker {
+  z-index: 1000;
+}
+
+.last-message {
+  padding-bottom: 120px;
+}
+
+.pickup-box {
+  border: 2px solid #D61718;
+  cursor: pointer;
+  transition: opacity 0.3s;
+}
+
+// .marker-wrapper {
+//   position: relative;
+//   display: flex;
+//   flex-direction: column;
+//   align-items: center;
+// }
+
+// .label-text {
+//   background: white;
+//   padding: 2px 6px;
+//   border-radius: 4px;
+//   // font-size: 12px;
+//   margin-bottom: 4px;
+// }
+
+.marker-wrapper {
+  position: relative;
+  width: 30px;
+  height: 40px;
+}
+
+.marker-icon {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.label-text {
+  position: absolute;
+  top: 3px;
+  /* 根據你圖標的圖形微調 */
+  left: 60%;
+  transform: translateX(-50%);
+  color: white;
+  font-size: 14px;
+  font-weight: bold;
+  text-shadow: 0 0 2px #000;
+  /* 加一點黑色描邊，增加對比 */
+  pointer-events: none;
+}
+
+.marker-icon {
+  width: 30px;
+  height: 35px;
+}
+
+.leaflet-popup-content {
+  margin: 5px 15px 5px 15px;
+}
+
+.draggable-mic {
+  position: fixed;
+  z-index: 9999;
+  cursor: grab;
+}
+
+.mic-button {
+  background-color: #d61718;
+  border-radius: 9999px;
+  padding: 10px;
+  border: 2px solid #d61718;
+  box-shadow: 0 0 10px rgba(0, 0, 0, 0.3);
+
+}
+
+
+
+.drag-handle-area {
+  width: 85%;
+  height: 50px;
+  cursor: grab;
+  background: transparent;
+  position: absolute;
+  z-index: 998;
+  bottom: -18px;
+  left: 0;
+  font-weight: 700;
+  letter-spacing: 3px;
+  // pointer-events: none;
+
+}
+
+.draggable-button:hover {
+  cursor: grab;
+}
+
+.draggable-button:active {
+  cursor: grabbing;
+}
+
+
+@keyframes float {
+
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+.floating {
+  animation: float 2s ease-in-out infinite;
+}
+
+.text-gray {
+  color: #6B7280;
+}
+
+.mic-drag-wrapper {
+  width: 150px;
+  height: 150px;
+  border-radius: 9999px;
+  background: rgba(0, 0, 0, 0.05);
+  /* 微淡灰提示背景 */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  box-shadow: 0 0 6px rgba(0, 0, 0, 0.1);
+}
+
+.mic-drag-wrapper:hover {
+  background: rgba(0, 0, 0, 0.1);
 }
 </style>
